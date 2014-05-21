@@ -1,0 +1,660 @@
+<?php
+// $Id$
+/**
+ * Module for Digital Grinnell code and utilities.
+ * @see http://digital.grinnell.edu
+ * 
+ * Authors:  Mark A. McFate
+ *
+ */
+
+//-------------------------------------------------------------------------------------
+// dg_utilities_init( )
+//
+//   Initialize the module.
+//
+
+function dg_utilities_init( )
+  {
+  }
+  
+//-------------------------------------------------------------------------------------
+// dg_return_awstats( $pidn )
+// 
+// This function returns a count of page visits to the /drupal/fedora/repository
+// page associated with the specified $pidn (numeric portion of the PID) object as well
+// as the estimated number of "downloads" associated with the object.
+// The function collects this information using a series of simple grep calls against the
+// AWStats aggregated data files found in /var/lib/awstats.
+//
+
+function dg_return_awstats( $pidp, $pidn, $pdfID )
+  {
+  $visits = $downloads = array( );
+  
+  $divider = "\(:\|%3A\)";   // PID divider can be : or $3A.  This expression matches either.
+  $awk = " [0-9]\+ [0-9]\+ [0-9]\+ [0-9]\+$' /var/lib/awstats/aw*.txt | awk '{ sum += $2 } END { print sum }'";
+  
+  // visits
+  $command = "grep '^/drupal/fedora/repository/".$pidp.$divider.$pidn.$awk; 
+  exec( $command, $visits );
+  // book or generic downloads
+  if ( $pdfID ) 
+    $command = "grep '^/drupal/fedora/repository/".$pidp.$divider.$pidn.$pdfID.$awk;
+  else
+    $command = "grep '^/drupal/viewer/".$pidp.$divider.$pidn."/.\+/download".$awk;
+  exec( $command, $downloads );
+
+  return array( $visits[0] + 1, $downloads[0] );
+  }
+  
+  
+//-------------------------------------------------------------------------------------
+// expose_google_scholar_objects( $field, $filter );
+//
+//   Function to find and list all PDF objects where fedora.doFields.<field> 
+//   contains the the $filter string.  This function is called by the DG page at
+//   http://digital.grinnell.edu/content/google_scholar_objects.
+//
+
+function expose_google_scholar_objects( $field, $filter )
+  {
+  module_load_include( 'inc', 'content_model_viewer', 'DatastreamProperties' );
+  
+  $results = array( );
+  $obj = array( );
+
+  // FB::group( 'expose_google_scholar_objects' );
+  
+  $server = 'http://' .$_SERVER['HTTP_HOST'];
+  // FB::info( $current_url, 'Current URL is' );
+  
+  // Prep a query for the target objects.
+  //
+  $sql = "SELECT pid FROM doFields ".
+           "WHERE ( ".$field." REGEXP '".$filter."' );" ;
+  //       "WHERE (( dcFormat like '%pdf%') AND ( ".$field." REGEXP '".$filter."' ));" ;
+		   
+  // We need to query the 'fedora' database so switch there, run the query, then switch back.
+  //   Note that the fedora DB must be declared as an element of the $db_url[ ] array in 
+  //   ../drupal/sites/default/settings.php along with default.  Also, it's important that 
+  //   the fedora DB needs to have a copy of both the 'users' and 'sessions' tables included in 
+  //   order to query properly.
+  //
+  $previous = db_set_active( 'fedora' );
+
+  // FB::info( $sql, 'SQL is' );  
+	
+  $resource = db_query( $sql );
+    
+  while ( $row = db_fetch_array( $resource )) $results[ ] = $row;
+	
+  // $headers = array( 'pid' );
+  // $logTable = array( $headers ) + $results;
+  // FB::table( "Query Results", $logTable );
+  
+  // Return the focus to the default (Drupal) database.
+  
+  db_set_active( $previous );	
+
+  // Print an HTML table of links.  Order is not important.
+  
+  print "<p>The following objects match the REGEXP of '$filter' in field '$field' and ".
+      "have at least one datastream with a MIME type of application/pdf.</p>";
+  print "<table>";
+    
+  foreach ( $results as $key => $data )
+    {
+    $dsArray = array( );
+    
+	  // Get the pid and namespace. 
+	
+	  $pid = $data['pid'];
+	  list( $namespace, $pidn ) = split( ':', $pid, 2 );
+	
+    // Fetch an array of all datastreams associated with this object.
+     
+    $dsProp = new DatastreamProperties( $pid );
+    list( $dsArray, $count ) = $dsProp->get( 0, 99 );
+    
+    // FB::info( $count, 'Number of Datastreams is' );
+    // FB::info( $dsArray, 'DatastreamProperties array' );
+    
+    // Check the returned datasteams for any with ['mime'] of 'application/pdf'.  
+    // Include this object only if a corresponding PDF item is found.
+   
+    $i = 0;
+    $foundPDF = $download = NULL;
+
+    do 
+      {
+      foreach ( $dsArray[$i] as $k => $v )
+        {
+        if ( $k === 'mime' && $v === 'application/pdf' ) $foundPDF = TRUE;
+        if ( $k === 'download' ) $download = $v;
+        }
+      } 
+    while ( !$foundPDF && $i++ < $count );
+
+    // FB::info( $i, 'Found key mime=application/pdf at row' );
+    // FB::info( $download, 'Download object is' );
+
+    if ( $foundPDF ) 
+      {
+      // Call fetch_google_scholar_data to retrieve the corresponding object data.
+	
+	    fetch_google_scholar_data( $pid, &$obj );
+
+	    // Build 3 links...the first points to this object's GSPage, the 2nd points to the 
+	    // PDF download, and the third is to the DG object itself.
+	
+	    $urls['page'] = sprintf( '%s/drupal/content/GSPage:%s', $server, $pidn );
+	    $urls['pdf'] = sprintf( '%s/drupal/viewer/%s/%s/download', $server, $pid, $download );
+	    $urls['dg'] = sprintf( '%s/drupal/fedora/repository/%s', $server, $pid );
+	    $urls['handle'] = sprintf( 'http://hdl.handle.net/%s/%s', H_PREFIX, $pidn );
+
+	    //  Add the GSPage link to the table.
+	    //
+      print "<tr><td>";
+	    print "<a href='".$urls['page']."'>".$obj['title']."</a>";
+	    print "</td></tr>";
+	
+	    // And build the object's corresponding GSPage.
+	    //
+	    build_one_google_scholar_page( $pidn, $urls, $obj['title'], $obj['author'], 
+	      $obj['dateCreated'] , $obj['abstract'] );
+      }  
+    }
+
+  print "</table>";	
+
+  // FB::groupend( );
+  }
+  
+//-------------------------------------------------------------------------------------
+// build_one_google_scholar_page( $pidn, $url, $title, $authors, $pubDate, $abstract );
+//
+//   Function to construct the body of a node as a Google Scholar 'page' complete with
+//   necessary meta tags.
+//
+
+function build_one_google_scholar_page( $pidn, $urls, $title, $authors, $pubDate, $abstract  )
+  {
+  // FB::group( 'build_one_google_scholar_page' );
+
+  // Does the target page already exist?  If not, create a new one...otherwise just update.
+  
+  if ( !$node = node_load( array( 'title' => $title, 'type' => 'page' )))
+    $node = new stdClass( );      // Build a new page node.
+	
+  $auth = explode( '<br/>', $authors );
+  
+  $node->name = $title;
+  $node->title = $node->name;
+  $node->body = '<i>'.$authors.'</i><p>'.$pubDate.'</p><p>ABSTRACT</p>'.$abstract;
+  $node->body .= "<p><a href='".$urls['pdf']."'>PDF Document</a></p>";
+  $node->body .= "<p><a href='".$urls['dg']."'>".$urls['dg']."</a></p>";
+  $node->body .= "<p>Handle Reference: <a href='".$urls['handle']."'>".$urls['handle']."</a></p>";
+  $node->type = 'page'; 
+  $node->created = time( );
+  $node->changed = $node->created;
+  $node->promote = 0;                 // Display on front page ? 1 : 0
+  $node->sticky = 0;                  // Display top of page ? 1 : 0
+  $node->format = 2;                  // 1:Filtered HTML, 2: Full HTML
+  $node->status = 1;                  // Published ? 1 : 0
+  $node->language = 'en';
+  $node->path = 'content/GSPage:'.$pidn;
+  
+  // FB::info( $node, 'Node is' );
+  
+  // Save the node
+  
+  if ( $node = node_submit( $node )) 
+    {
+    node_save( $node );
+     
+    /* Note that the Nodewords portion of this function was removed on 
+    * 19-Dec-2012 and replaced with calls in ../sites/all/themes/grinnell/template.php 
+    * to function build_key_metatags (found elsewhere in the dg_utilities module). */
+    
+    // FB::info( t( "Node '".$node->title."' added correctly" )); 
+	  }
+  	  
+  // FB::groupend( );
+  }
+
+function p2nl( $str ) 
+  {
+  return preg_replace( array( "/<p[^>]*>/iU","/<\/p[^>]*>/iU" ), array( "","\n" ), $str );
+  }   
+  
+//-------------------------------------------------------------------------------------
+// fetch_google_scholar_data( $pid, &$var );
+//
+//   Returns:  An array of key => value pairs.  Included keys are 'abstract', 'title',
+//     'dateCreated', and 'author'.
+//
+
+function fetch_google_scholar_data( $pid, array &$vars )
+  {
+  dg_seo_fetch_key_metadata( $pid, &$vars );
+  }
+
+//-------------------------------------------------------------------------------------
+// expose_all_objects( )
+//
+//   Function to find and list all DG objects to assist in Google sitemap construction.
+//   This function is called by the DG page at http://digital.grinnell.edu/content/object-index.
+//
+
+function expose_all_objects(  )
+  {
+  module_load_include( 'inc', 'content_model_viewer', 'DatastreamProperties' );
+  
+  $results = array( );
+  $obj = array( );
+
+  // FB::group( 'expose_all_objects' );
+  
+  $server = 'http://' .$_SERVER['HTTP_HOST'];
+  // FB::info( $current_url, 'Current URL is' );
+  
+  // Prep a query for all grinnell:* objects which are Active.
+  //
+  $sql = "SELECT pid, label, dcIdentifier FROM doFields ".
+           "WHERE (( state = 'a' ) AND ( pid LIKE 'grinnell:%' ));" ; 
+		   
+  // We need to query the 'fedora' database so switch there, run the query, then switch back.
+  //   Note that the fedora DB must be declared as an element of the $db_url[ ] array in 
+  //   ../drupal/sites/default/settings.php along with default.  Also, it's important that 
+  //   the fedora DB needs to have a copy of both the 'users' and 'sessions' tables included in 
+  //   order to query properly.
+  //
+  $previous = db_set_active( 'fedora' );
+
+  // FB::info( $sql, 'SQL is' );  
+	
+  $resource = db_query( $sql );
+    
+  while ( $row = db_fetch_array( $resource )) $results[ ] = $row;
+	
+  // $headers = array( 'pid' );
+  // $logTable = array( $headers ) + $results;
+  // FB::table( "Query Results", $logTable );
+  
+  // Return the focus to the default (Drupal) database.
+  
+  db_set_active( $previous );	
+
+  // Print an HTML table of links.  Order is not important.
+  
+  print "<p>The following grinnell:* objects are ACTIVE and have an assigned Handle.</p>";
+  print "<table><tr><th>#</th><th>PID</th><th>Handle</th><th>Title</th></tr>";
+  
+  $count = 0;
+    
+  foreach ( $results as $key => $data )
+    {
+	  // Get the Handle. 
+	  //
+	  $record = $data['dcIdentifier'];
+    $hdl = array( );
+    $target = "/http:\/\/hdl\.handle\.net\S*/";
+	  $found = preg_match( $target, $record, &$hdl );
+    $url = sprintf( '%s/drupal/fedora/repository/%s', $server, $data['pid'] );
+    
+	  //  Add the link to the table if it has a valid Handle.
+	  //
+    if ( $found === 1 ) 
+      {
+      $count++;
+      print "<tr><td>" . $count . "</td>";
+      print "<td>" . $data['pid'] . "</td>";
+	    print "<td width='200px'><a href='" . $hdl[0] . "'>" . $hdl[0] . "</a></td>";
+	    print "<td><a href='" . $url . "'>" . $data['label'] . "</a></td></tr>";
+      }
+    }  
+
+  print "</table>";	
+
+  // FB::groupend( );
+  }
+
+//-------------------------------------------------------------------------------------
+// dg_custom_controls( $pid )
+//
+//   Function to insert DG custom controls (for things like cover sheet and transcription)
+//   control into certain pages.
+//
+
+function dg_custom_controls( $pid, $title  )
+  {
+  module_load_include('inc', 'csl', 'CSL');
+  
+  list( $pidp, $pidn ) = split( ":", $pid );
+
+  // Setup data for cover sheet generation.
+  
+  $theme_path = drupal_get_path('theme',$GLOBALS['theme']);
+  $cs_path = $theme_path.'/templates/dgCoverSheet.xsl'; 
+  
+  $model = new CitationModel( $pid );
+  $item = & $model->item;
+  
+  // MAM - New citation code - 28-10-2013
+  // Citation... build the default citation and add it to the temporary coversheet XML
+  /*
+  $default_style_name = CSL::GetDefaultName();
+  list( , $citation ) = $model->getCitation( $default_style_name );
+  // ------------------------------ */   
+        
+  $mods = dg_seo_fetch_MODS( $pid );
+  $temp_file = file_directory_temp( )."/".$pid.".xml";
+  $fh = fopen( $temp_file, 'w' );
+  
+  // MAM - More new citation code - 28-10-2013
+  /*
+  $xmods = new SimpleXMLElement( $mods );
+  if ( $xmods->addChild( 'citation', $citation ))
+    $item->modify_data1stream_by_value( $xmods->asXML( ), 'MODS', 'MODS Record', 'text/xml' );
+  // ------------------------------- */
+  
+  fwrite( $fh, '<?xml-stylesheet href="/drupal/'.$cs_path.'" type="text/xsl"?>' );
+  fwrite( $fh, "\r\n" );
+  fwrite( $fh, $mods );
+  // fwrite( $fh, $xmods );
+  fclose( $fh );
+  
+  // Now deal with transcription.
+  //
+  // Sample link: http://digitaltest.grinnell.edu/drupal/transcribe/transcribe2.php?pid=grinnell:214&title=john%20brown%20in%20grinnell
+  
+  $transcribable = FALSE;
+  $tmods = trim( $mods );
+  // mods:mods/mods:relatedItem[@displayLabel="Transcribe This Item" and @type="constituent"]/mods:identifier[@type="uri"]';
+
+  if ( !empty( $tmods )) 
+    {
+    $xmods = new SimpleXMLElement( $tmods );
+    $xpath = '/mods:mods/mods:relatedItem[@type="constituent"]/@displayLabel';
+    $result = $xmods->xpath( $xpath );
+    if ( $result )
+      {
+      while( list( $id, $attr ) = each( $result )) {
+        $transcribable = ( strcmp( $attr, 'Transcribe This Item' ) == 0 );
+        }
+      }
+    }
+  
+  if ( $transcribable ) 
+    {
+    $transcribe = '/transcribe/transcribe2.php?pid='.rawurlencode($pid).'&title='.rawurlencode($title);
+    // Modify the MODS relatedItem identifier where attribute displayLabel='Transcribe This Item' and update the datastream.
+    foreach ( $xmods->relatedItem as $rI ) 
+      {
+      $attr = $rI->attributes( );
+      if ( strcmp( $attr[displayLabel], 'Transcribe This Item' ) == 0 )
+        {
+        $rI->identifier = $transcribe;  
+        $item->modify_datastream_by_value( $xmods->asXML( ), 'MODS', 'MODS Record', 'text/xml' );
+        }
+      }  
+    }  
+    
+  $addition = '';
+  $addition .= "<div class='dg_custom_controls'>";
+  
+  /* MAM changes per J Bauder request on 2013-12-03 to removed ALL window.close() calls for IE compatibility.
+  *  For example, the first "addition" line was previously...
+  *    $addition .= "<button class='dg_custom_controls' onClick=\"window.open('../../".$temp_file."'); window.close();\">Open a Printable Cover Sheet</button>";
+  */
+  
+  $addition .= "<button class='dg_custom_controls' onClick=\"window.open('../../".$temp_file."'); \">Open a Printable Cover Sheet</button>";
+  if ( $transcribable )
+    $addition .= "<button class='dg_custom_controls' onClick=\"window.open('../..".$transcribe."', '_blank', 'toolbar=0,location=0,menubar=0,resizable=1,width=600,height=900'); \">Transcribe/Caption This Object</button>";
+  
+  // If this is a book with an available PDF datastream (like Beowulf, grinnell:3615) then create an
+  // additional button to open and display the associated PDF.
+  //
+  // if ( $pid === "grinnell:3615" )  
+  //   $addition .= "<button class='dg_custom_controls' onClick=\"window.open('https://digital.grinnell.edu/drupal/fedora/repository/grinnell%3A3615/PDF_SPREAD/PDF%20Spread'); \">Open a PDF Copy of this Object</button>";
+  //
+  if ( $link = dg_object_has_PDF( $pid ))
+    {
+    $addition .= "<button class='dg_custom_controls' onClick=\"window.open('https://digital.grinnell.edu/drupal/fedora/repository/";
+    $addition .= $pid.$link."'); \">Open a PDF Copy of this Object</button>";
+    }
+    
+  // Calculate and display number of visits and downloads per AWStats.  
+ 
+  list( $visits, $downloaded )  = dg_return_awstats( $pidp, $pidn, $link );
+  if ( !$downloaded ) $downloaded = 0;
+  $times = ( $visits == 1 ? "time" : "times" );
+  $downloads = ( $downloaded == 1 ? "time" : "times" );
+  $addition .= "<table><tr><td>This Digital.Grinnell object ( <i>$pidp:$pidn</i> ) has been visited <b>$visits</b> $times in its history. ";
+  $addition .= "&nbsp;Portions of this object have been downloaded an estimated <b>$downloaded</b> $downloads.</td></tr></table>";
+  $addition .= "</div>";
+  
+  return $addition;
+  }  
+
+//-------------------------------------------------------------------------------------
+// dg_object_has_PDF( $pid )
+//
+//   This function determines if a specified object (PID) has any PDF datastreams where
+//   the ID=PDF* and MIME type = "application/pdf".  If they do, render a button to make the
+//   PDF accessible.
+//   
+//   Return:  URL to the PDF_SPREAD (preferred) or PDF item if available.  Otherwise this
+//   function returns a NULL value.
+//
+function dg_object_has_PDF( $pid )
+  {
+  module_load_include( 'inc', 'scholar', 'CitationModel' );
+  $model = new CitationModel( $pid );
+  $item = & $model->item;
+  
+  // Get the PDF or PDF_SPREAD datastream.
+  
+  if ( isset( $item->datastreams['PDF_SPREAD'] )) 
+    $id = 'PDF_SPREAD';
+  else if ( isset( $item->datastreams['PDF'] ))
+    $id = 'PDF';
+  else
+    return NULL;
+
+  // Extract the datastream label and build a URL if the MIME type is "application/pdf".
+
+  $pdf = $item->get_datastream_info( $id );
+  if ( $pdf->datastream->MIMEType != "application/pdf" )
+    return NULL;
+  
+  $label = $pdf->datastream->label;
+    
+  return "/".$id."/".rawurlencode($label);
+  }
+
+//-------------------------------------------------------------------------------------
+// dc_maint_hook_form( )
+//
+//   This function is designed to provide a form that can be called to help maintain
+//   DG's DC (Dublin Core) records.  
+//
+  
+function dc_maint_hook_form( ) 
+  {
+  $form = array( );
+  
+  $form['container'] = array(
+      '#type'             => 'fieldset',
+      '#title'            => t( 'DC Record Maint. Form' ),
+      '#description'      => t( 'This form and its actions are here to help with '.
+          'DC (Dublin Core) record maintenance.  If you do NOT know what '.
+          'to do here, please turn back now!  See dc_maint_hook_form( ) in the '.
+          'dg_utilities module to make changes.' )
+    );
+  
+  $form['container']['select'] = array (
+      '#type'             => 'select',
+      '#title'            => t( 'Select the control argument to pass to dc_record_maint.' ),
+      '#options'          => array( 
+         'OAI_DC' => t('Remove All oai_dc:identifier Nodes')
+        )
+    );
+     
+  $form['container']['limit'] = array (
+      '#type'             => 'textfield',
+      '#title'            =>  t( 'Enter the max. number of objects to process.  Default is 10000.' ),
+      '#default_value'    => '10000'
+    );
+  
+  $form['container']['first'] = array (
+      '#type'             => 'textfield',
+      '#title'            =>  t( 'Enter the first PID number to process.  Default is 0.' ),
+      '#default_value'    => '0'
+    );
+  
+  $form['container']['last'] = array (
+      '#type'             => 'textfield',
+      '#title'            =>  t( 'Enter the last PID number to process.  Default is 0.' ),
+      '#default_value'    => '0'
+    );
+
+  $form['submit'] = array (
+      '#type'             => 'submit',
+      '#value'            => t( 'Submit' )
+    );
+  
+  return $form;
+  }
+
+//-------------------------------------------------------------------------------------
+// dc_maint_hook_form_submit( $form, &$form_state );
+//
+// Function to take action whenever dc_maint_hook_form is submitted.  Changes here
+// should coincide with changes to dc_maint_hook_form( ) above.
+//  
+
+ function dc_maint_hook_form_submit( $form, &$form_state ) 
+   {
+   $values = $form_state['values'];
+   // FB::info( $values, 'form_state[values] array' );
+   
+   $message = "Function dc_maint_hook_form_submit( ) was called.&nbsp;&nbsp;This function is ".
+     "defined in the dg_utilities module.&nbsp;&nbsp;\r\n ";
+   $message .= "Form contents are...\r\n ";
+   $message .= "Select Field: ".$values['select']." \r\n";
+   $message .= "Object Limit is: ".$values['limit']." \r\n";
+   $message .= "First PIDN Field: ".$values['first']." \r\n";
+   $message .= "Last PIDN Field: ".$values['last']." \r\n";
+   $message .= "Call to dc_record_maint( ".$values['select'].", ".$values['limit'].", ".$values['first'].", ".$values['last']." ) is complete.";
+   
+   dc_record_maint( $values['select'], $values['limit'], $values['first'], $values['last'] );
+   drupal_set_message( t( $message ));
+   }
+  
+  
+//-----------------------------------------------------------------------------------
+// dc_record_maint( $op = 'OAI_DC', $limit = '10000', $first = '0', $last = '0' );
+// 
+// Function to apply various corrective actions to target DC datastreams.
+//
+  
+function dc_record_maint( $op = 'OAI_DC', $limit = '10000', $first = '0', $last = '0' )
+  {
+  module_load_include( 'inc', 'content_model_viewer', 'DatastreamProperties' );
+  module_load_include( 'inc', 'scholar', 'CitationModel' );
+  $results = array( );
+
+  dsm( "Function dc_record_maint called with OP of '$op'.\n" );
+  
+  // Run a SPARQL query against the Fedora repo to return all ACTIVE, grinnell:nnnn PIDs.
+  //
+  $query_string = 'SELECT ?subject WHERE {
+    ?subject <fedora-model:state> <fedora-model:Active> ;
+          <fedora-model:hasModel> <info:fedora/fedora-system:FedoraObject-3.0> .
+    FILTER(regex(str($subject), "^info:fedora/grinnell:"))
+    }';
+
+  $query_string = htmlentities( urlencode( $query_string ));
+  $url = variable_get( 'fedora_repository_url', 'http://localhost:8080/fedora/risearch' );
+  $url .= '?type=tuples&flush=true&format=csv&limit='.$limit.'&lang=sparql&stream=on&query=' . $query_string;
+
+  $curl = curl_init( ); 
+
+  curl_setopt( $curl, CURLOPT_URL, $url ); 
+  curl_setopt( $curl, CURLOPT_HEADER, 0 );
+  curl_setopt( $curl, CURLOPT_RETURNTRANSFER, true );  // to return the response rather than printing it
+  
+  if ( !$content = curl_exec( $curl )) die( 'curl_exec failed!' );
+  curl_close( $curl );
+
+  $results = explode( "\n", $content );
+  $object_pids = preg_replace( '/^info:fedora\/|"parent"| /', '', $results );
+  $object_pids = array_values( array_filter( $object_pids )); 
+
+  // print_r( $object_pids, 'Active PID array' );
+  
+  $total = count( $object_pids );
+  dsm( "The SPARQL query of the Fedora database returned $total ACTIVE objects.\n" );
+  // dsm( "   ". $query_string ."\n" );
+	
+  if ( $total >= intval( $limit )) 
+    dsm( "The SPARQL query returned the \nlimit of $total objects so \nnot all available objects may be processed!" );
+
+  // Loop through all returned objects.  Get the namespace and PID number and proceed.
+  //
+  foreach ( $object_pids as $pid )
+    {
+	  list( $pidNS, $pidn ) = split( ':', $pid, 2 );
+    if ( !$pidn || $pidn < intval( $first ) || $pidn > intval( $last )) continue;     // skip any non-numeric PID or those below $first
+
+    // Fetch this object's title from the MODS xml datastream.
+    // 
+    $model = new CitationModel( $pid );
+    $item = & $model->item;
+    $title = NULL;
+  
+    if ( isset( $item->datastreams['MODS'] )) 
+      {
+      $mods = trim( $item->get_datastream_dissemination( 'MODS' ));
+      if ( !empty( $mods )) 
+	      {
+        $new_mods = new SimpleXMLElement( $mods );
+        $title = ( string ) $new_mods->titleInfo[0]->title;
+
+        // OK, here's the root of this function... the $op switch.
+        //
+        switch( $op )
+          {
+          
+          case 'OAI_DC' :
+            $types = array( "uri", "doi", "pid" );
+            if ( isset( $item->datastreams['DC'] )) 
+              {
+              $dc = trim( $item->get_datastream_dissemination( 'DC' ));
+              if ( !empty( $dc ))
+                {
+                dsm( "Examining DC record of object $pid, titled '$title'.\n" );
+                $new_dc = new SimpleXMLElement( $dc );
+                foreach ( $types as $type )
+                  {
+                  $xpath = '/oai_dc:dc/dc:identifier[contains(.,"'.$type.':")]';
+                  if ( $node = $new_dc->xpath( $xpath )) 
+                    {
+                    dsm( "  The xpath '$xpath' found element '$node[0]'.\n" );
+//                    unset( $node[0][0] );
+//                    $item->modify_datastream_by_value( $new_dc->asXML( ), 'DC', 'Dublin Core Record', 'text/xml' );
+                    }
+                  }     // end of..foreach
+                }     // end of.. if ( !empty( $dc ))
+              }     // end of... if ( isset( $item->datastreams['DC'] )) 
+            break;
+
+          }  // end of... switch( $op )
+        }  // end of... if ( !empty( $mods ))
+      }  // end of... if ( isset( $item->datastreams['MODS'] ))
+    }  // end of... foreach ( $object_pids as $pid )
+  }; // end of dc_record_maint
+  
+?>
