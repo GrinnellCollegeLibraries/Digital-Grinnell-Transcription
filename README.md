@@ -82,3 +82,6 @@ Since the transcriptions are stored in Mediawiki, administrators have access to 
  
 With the addition of a PDF export extension ([http://www.mediawiki.org/wiki/Extension:Pdf_Export](http://www.mediawiki.org/wiki/Extension:Pdf_Export)) users can have the ability to export completed transcriptions as PDFs for ingestion into Islandora or another system that provides full-text searching of the transcriptions. Since the transcriptions-in-progress are stored in Mediawiki, outside of the repository system, they are not searchable by end-users of the repository until they are exported from Mediawiki and ingested into the repository system. (This may be a feature or a bug, depending on your perspective.)
 
+#License#
+[GPLv3](https://www.gnu.org/licenses/gpl-3.0.txt)
+
